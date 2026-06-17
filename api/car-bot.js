@@ -1,7 +1,7 @@
 const { GoogleGenAI } = require('@google/generative-ai');
 
 const ai = new GoogleGenAI(process.env.GEMINI_API_KEY);
-const model = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
+const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
 const systemInstruction = `Ты — опытный, вежливый и дружелюбный менеджер по прокату автомобилей в Кемере. 
 Твоя главная цель — помочь клиенту выбрать машину и взять его номер телефона для WhatsApp, чтобы передать его старшему менеджеру.
