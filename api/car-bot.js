@@ -1,13 +1,7 @@
 const { GoogleGenAI } = require('@google/generative-ai');
 
-const ai = new GoogleGenAI(process.env.GEMINI_API_KEY);
-const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
-
-const systemInstruction = `Ты — опытный, вежливый и дружелюбный менеджер по прокату автомобилей в Кемере. 
-Твоя главная цель — помочь клиенту выбрать машину и взять его номер телефона для WhatsApp, чтобы передать его старшему менеджеру.
-Цены у нас гибкие, зависят от сезона и срока. Отвечай коротко, не пиши огромные тексты. Когда пользователь готов оставить телефон или пишет его, поблагодари его.`;
-
 module.exports = async (req, res) => {
+    // Сразу отвечаем Telegram, что запрос принят
     if (req.method !== 'POST') {
         return res.status(200).send('OK');
     }
@@ -21,7 +15,7 @@ module.exports = async (req, res) => {
         const chatId = message.chat.id;
         const text = message.text.trim();
 
-        // Простая проверка на номер телефона (если в тексте больше 7 цифр)
+        // Проверяем, оставил ли пользователь номер телефона
         const digits = text.replace(/\D/g, '');
         if (digits.length >= 7) {
             // 1. Отправляем скрытную заявку ВАМ (администратору)
@@ -30,14 +24,14 @@ module.exports = async (req, res) => {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        chat_id: process.env.MY_TELEGRAM_ID, // Уходит строго вам
+                        chat_id: process.env.MY_TELEGRAM_ID,
                         text: `🚗 *Новая заявка на АРЕНДУ АВТО!*\n📱 Телефон клиента: +${digits}`,
                         parse_mode: 'Markdown'
                     })
                 });
             }
 
-            // 2. Отвечаем клиенту в чат
+            // 2. Отвечаем клиенту в чат бота
             await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -50,30 +44,34 @@ module.exports = async (req, res) => {
             return res.status(200).send('OK');
         }
 
-        // Если это обычный текст — отвечает ИИ Gemini
-        const chat = model.startChat({
-            history: [],
-            generationConfig: { maxOutputTokens: 300 }
-        });
+        // Правильное подключение ИИ Gemini для Vercel
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const model = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+        const systemInstruction = `Ты — опытный, вежливый и дружелюбный менеджер по прокату автомобилей в Кемере. 
+Твоя главная цель — помочь клиенту выбрать машину и взять его номер телефона для WhatsApp.
+Цены у нас гибкие. Отвечай коротко, не пиши огромные тексты.`;
 
         const prompt = `${systemInstruction}\n\nПользователь пишет: ${text}`;
-        const result = await chat.sendMessage(prompt);
+        const result = await model.generateContent(prompt);
         const responseText = result.response.text();
 
+        // Отправляем ответ ИИ обратно клиенту
         await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 chat_id: chatId,
                 text: responseText,
-                parse_mode: 'Markdown' // Делает текст красивым (жирный, курсив)
+                parse_mode: 'Markdown'
             })
         });
 
         return res.status(200).send('OK');
 
     } catch (error) {
-        console.error('Ошибка:', error);
+        console.error('Ошибка в коде:', error);
+        // Не даем серверу упасть, всегда возвращаем 200
         return res.status(200).send('OK');
     }
 };
