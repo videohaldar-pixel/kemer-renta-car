@@ -1,103 +1,79 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+const { GoogleGenAI } = require('@google/generative-ai');
 
-// Инициализация Gemini 2.5 Flash
-const apiKey = (process.env.GEMINI_API_KEY || "").trim();
-const genAI = new GoogleGenerativeAI(apiKey);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const ai = new GoogleGenAI(process.env.GEMINI_API_KEY);
+const model = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-// Токены из настроек Vercel для уведомлений вам в ЛС
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN?.trim(); 
-const MY_TELEGRAM_ID = process.env.MY_TELEGRAM_ID?.trim(); 
+const systemInstruction = `Ты — опытный, вежливый и дружелюбный менеджер по прокату автомобилей в Кемере. 
+Твоя главная цель — помочь клиенту выбрать машину и взять его номер телефона для WhatsApp, чтобы передать его старшему менеджеру.
+Цены у нас гибкие, зависят от сезона и срока. Отвечай коротко, не пиши огромные тексты. Когда пользователь готов оставить телефон или пишет его, поблагодари его.`;
 
-// Функция для гарантированной отправки контактов клиента вам в ЛС
-async function notifyAdmin(text) {
-  if (!TELEGRAM_TOKEN || !MY_TELEGRAM_ID) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: Number(MY_TELEGRAM_ID), text: text })
-    });
-  } catch (e) {
-    console.error("Ошибка уведомления админа:", e);
-  }
-}
-
-export default async function handler(req, res) {
-  // Так как это только Telegram, CORS настройки не нужны. Просто отвечаем на OPTIONS
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  try {
-    const body = req.body || {};
-    
-    // Проверяем, что запрос пришел именно от Telegram
-    if (!body.message || !body.message.chat) {
-      return res.status(200).send("OK");
+module.exports = async (req, res) => {
+    if (req.method !== 'POST') {
+        return res.status(200).send('OK');
     }
 
-    const tgChatId = body.message.chat.id;
-    let userText = body.message.text ? String(body.message.text).trim() : "";
-
-    // Если пользователь прислал не текст (например, локацию или фото)
-    if (!userText) {
-      return res.status(200).json({
-        method: "sendMessage",
-        chat_id: tgChatId,
-        text: "🚗 Рад приветствовать вас! Пожалуйста, напишите ваш вопрос или пожелания по автомобилю текстом."
-      });
-    }
-
-    // Если клиент только запустил бота
-    if (userText === '/start') {
-      userText = "Привет! Какие машины у вас есть в аренду и какие условия?";
-    }
-
-    // Регулярное выражение для поиска номера телефона
-    const phoneRegex = /(\+?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d[\s-]?\d?[\s-]?\d?[\s-]?\d?[\s-]?\d?)/;
-    const foundPhone = userText.match(phoneRegex);
-    
-    if (foundPhone) {
-        const cleanPhone = foundPhone[0].replace(/[\s-]/g, '');
-        if (cleanPhone.length >= 7 && /^\+?\d+$/.test(cleanPhone)) {
-            // Отправляем заявку вам в личные сообщения Telegram
-            await notifyAdmin(`🚗 Новая заявка на АРЕНДУ АВТО!\n📞 Телефон клиента: ${cleanPhone}\n💬 Сообщение: "${userText}"`);
+    try {
+        const { message } = req.body;
+        if (!message || !message.text) {
+            return res.status(200).send('OK');
         }
+
+        const chatId = message.chat.id;
+        const text = message.text.trim();
+
+        // Простая проверка на номер телефона (если в тексте больше 7 цифр)
+        const digits = text.replace(/\D/g, '');
+        if (digits.length >= 7) {
+            // 1. Отправляем скрытную заявку ВАМ (администратору)
+            if (process.env.MY_TELEGRAM_ID) {
+                await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: process.env.MY_TELEGRAM_ID, // Уходит строго вам
+                        text: `🚗 *Новая заявка на АРЕНДУ АВТО!*\n📱 Телефон клиента: +${digits}`,
+                        parse_mode: 'Markdown'
+                    })
+                });
+            }
+
+            // 2. Отвечаем клиенту в чат
+            await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    text: 'Отлично! Благодарю вас за номер! Наш менеджер уже связывается с вами в WhatsApp для подбора лучшего варианта. Комфортных дорог!'
+                })
+            });
+
+            return res.status(200).send('OK');
+        }
+
+        // Если это обычный текст — отвечает ИИ Gemini
+        const chat = model.startChat({
+            history: [],
+            generationConfig: { maxOutputTokens: 300 }
+        });
+
+        const prompt = `${systemInstruction}\n\nПользователь пишет: ${text}`;
+        const result = await chat.sendMessage(prompt);
+        const responseText = result.response.text();
+
+        await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: responseText,
+                parse_mode: 'Markdown' // Делает текст красивым (жирный, курсив)
+            })
+        });
+
+        return res.status(200).send('OK');
+
+    } catch (error) {
+        console.error('Ошибка:', error);
+        return res.status(200).send('OK');
     }
-
-    // Системная инструкция для ИИ (Промпт Менеджера по автопрокату)
-    const systemPrompt = `Ты — дружелюбный и профессиональный менеджер по аренде автомобилей.
-    Твоя цель — помочь клиенту выбрать машину и взять у него номер телефона для связи в WhatsApp, чтобы менеджер завершил оформление.
-    Отвечай вежливо, кратко, используй автомобильную тематику (например: "Поехали!", "Комфортных дорог!").
-    Не называй точных цен, говори: "Цена зависит от автомобиля и срока аренды, у нас очень гибкие условия. Оставьте телефон, мы пришлем прайс в WhatsApp".
-    Язык ответа должен строго совпадать с языком пользователя (русский, английский или турецкий).
-    Если пользователь прислал номер телефона, тепло поблагодари его и напиши, что свяжешься с ним в WhatsApp в течение нескольких минут.`;
-
-    // Запрос к нейросети Gemini
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nПользователь: ${userText}` }] }]
-    });
-
-    const replyText = result.response.text() || "🚗 Менеджер на связи! Повторите, пожалуйста, ваш запрос.";
-
-    // Гарантированный ответ обратно в чат клиенту
-    return res.status(200).json({
-      method: "sendMessage",
-      chat_id: tgChatId,
-      text: replyText
-    });
-
-  } catch (error) {
-    console.error("Ошибка авто-бота:", error);
-    // Защита от падения: если что-то пошло не так, бот вежливо ответит, а не замолчит
-    if (req.body?.message?.chat?.id) {
-      return res.status(200).json({
-        method: "sendMessage",
-        chat_id: req.body.message.chat.id,
-        text: "Извините, связь с сервером немного барахлит. Пожалуйста, попробуйте написать еще раз или свяжитесь с нами напрямую!"
-      });
-    }
-    return res.status(200).send("OK");
-  }
-} 
+};
